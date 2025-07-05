@@ -9,4 +9,4 @@ dotenv
 langchain-community
 fpdf
 langchain_google_genai
-faiss-gpu
+faiss-cpu
