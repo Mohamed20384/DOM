@@ -1,49 +1,23 @@
 import json
 import os
-from fpdf import FPDF
-from fpdf.enums import XPos, YPos
-import arabic_reshaper
-from bidi.algorithm import get_display
+from docx import Document
+from docx.shared import Pt
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx2pdf import convert
 
 # === Settings ===
-INPUT_FILE = "Resturants.json"
-OUTPUT_DIR = "Resturants"
-FONT_PATH = "Cairo/static/Cairo-Regular.ttf"  # Adjust if the path is different
+INPUT_FILE = "Restaurants.json"
+DOCX_DIR = "Restaurants_Word"
+PDF_DIR = "Restaurants_PDF"
 
-# === Create output directory ===
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+# === Create output directories ===
+os.makedirs(DOCX_DIR, exist_ok=True)
+os.makedirs(PDF_DIR, exist_ok=True)
 
-# === Arabic Text Fix ===
-def reshape_arabic(text):
-    try:
-        reshaped = arabic_reshaper.reshape(str(text))
-        return get_display(reshaped)
-    except:
-        return str(text)
-
-# === PDF Writer Class ===
-class SimplePDF(FPDF):
-    def __init__(self):
-        super().__init__()
-        self.add_page()
-        self.add_font("Arabic", fname=FONT_PATH, uni=True)
-        self.set_font("Arabic", size=14)
-        self.set_right_margin(10)
-        self.set_left_margin(10)
-
-    def write_line(self, label, value):
-        if isinstance(value, list):
-            value = "، ".join(value)
-        elif isinstance(value, dict):
-            value = "\n".join([f"{k}: {v}" for k, v in value.items()])
-        text = f"{label}: {value}"
-        self.cell(0, 10, reshape_arabic(text), new_x=XPos.LMARGIN, new_y=YPos.NEXT, align='R')
-
-# === Load JSON ===
+# === Generate Word Docs ===
 with open(INPUT_FILE, 'r', encoding='utf-8') as f:
     data = json.load(f)
 
-# === Generate PDFs ===
 for rest in data:
     name = rest.get("name", "مطعم بدون اسم")
     address = rest.get("adress", "")
@@ -54,39 +28,59 @@ for rest in data:
     close_time = rest.get("closeTime", "غير معروف")
     cooking_time = rest.get("cookingTimeRange", "غير محدد")
 
-    pdf = SimplePDF()
-    pdf.write_line("اسم المطعم", name)
-    pdf.write_line("العنوان", address)
-    pdf.write_line("أرقام الهاتف", phone)
+    doc = Document()
 
-    # Comments
-    pdf.write_line("التعليقات", "")
+    def write_paragraph(label, value):
+        if isinstance(value, list):
+            value = "، ".join(value)
+        elif isinstance(value, dict):
+            value = "\n".join([f"{k}: {v}" for k, v in value.items()])
+        text = f"{label}: {value}"
+        para = doc.add_paragraph(text)
+        para.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+        run = para.runs[0]
+        run.font.name = 'Calibri'
+        run.font.size = Pt(14)
+
+    # === Content ===
+    write_paragraph("اسم المطعم", name)
+    write_paragraph("العنوان", address)
+    write_paragraph("أرقام الهاتف", phone)
+
+    write_paragraph("التعليقات", "")
     for email, comment in comments.items():
-        pdf.write_line(f"من {email}", comment)
+        write_paragraph(f"من {email}", comment)
 
-    # eMenu
-    pdf.write_line("القائمة الإلكترونية", "")
+    write_paragraph("القائمة الإلكترونية", "")
     for section_name, section in emenu.items():
-        pdf.write_line("القسم", section_name)
+        write_paragraph("القسم", section_name)
         if 'products' in section:
             for product in section['products']:
-                pdf.write_line(" - الاسم", product.get("name", ""))
-                pdf.write_line("   الوصف", product.get("desc", ""))
-                pdf.write_line("   السعر", product.get("price", ""))
+                write_paragraph(" - الاسم", product.get("name", ""))
+                write_paragraph("   الوصف", product.get("desc", ""))
+                write_paragraph("   السعر", product.get("price", ""))
                 if 'sizes' in product:
                     for size, price in product['sizes'].items():
-                        pdf.write_line(f"   الحجم: {size}", price)
+                        write_paragraph(f"   الحجم: {size}", price)
                 if 'extras' in product:
                     for extra, extra_price in product['extras'].items():
-                        pdf.write_line(f"   إضافة: {extra}", extra_price)
+                        write_paragraph(f"   إضافة: {extra}", extra_price)
 
-    pdf.write_line("وقت الفتح", str(open_time))
-    pdf.write_line("وقت الإغلاق", str(close_time))
-    pdf.write_line("مدة الطهي", str(cooking_time))
+    write_paragraph("وقت الفتح", str(open_time))
+    write_paragraph("وقت الإغلاق", str(close_time))
+    write_paragraph("مدة الطهي", str(cooking_time))
 
-    # Save PDF
+    # === Save DOCX ===
     safe_name = "".join(c if c.isalnum() or c in " _-" else "_" for c in name)
-    filename = f"{OUTPUT_DIR}/{safe_name}.pdf"
-    pdf.output(filename)
+    docx_path = os.path.join(DOCX_DIR, f"{safe_name}.docx")
+    pdf_path = os.path.join(PDF_DIR, f"{safe_name}.pdf")
+    doc.save(docx_path)
 
-print("✅ Arabic PDFs created successfully with proper text shaping and direction!")
+    # === Convert to PDF ===
+    try:
+        convert(docx_path, pdf_path)
+        print(f"✅ Converted to PDF: {pdf_path}")
+    except Exception as e:
+        print(f"❌ Error converting {safe_name} to PDF: {e}")
+
+print("✅ All restaurants converted to both Word and PDF formats.")

@@ -2,7 +2,7 @@ import os
 import io
 from dotenv import load_dotenv
 import streamlit as st
-from PyPDF2 import PdfReader
+import PyPDF2  # Added for PDF support
 import google.generativeai as genai
 from langchain.text_splitter import CharacterTextSplitter
 from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
@@ -23,17 +23,21 @@ st.set_page_config(
 # Configuration
 class Config:
     CHUNK_SIZE = 1000
-    CHUNK_OVERLAP = 200
+    CHUNK_OVERLAP = 300
     EMBEDDING_BATCH_SIZE = 10
     MAX_PREVIEW_CHARS = 5000
-    PDF_FOLDER = "Restaurants"
-    SYSTEM_PROMPT = """أنت (DOM) مساعد ذكي يتحدث العربية المصرية بطلاقة. 
-    و انت مواطن من مدينة دمياط الجديده لديك خبره كبيره في المطاعم في هذه المدينه 
-    ستجيب على الأسئلة بناءً على المعلومات الموجودة في مستندات PDF الخاصة بالمطاعم.
-    - استخدم لغة سهلة وبسيطة كما يتحدث المصريون
-    - إذا لم تجد الإجابة في المستندات قل "معنديش المعلومات دي للأسف"
-    - أجب بطريقة ودية ومرحة كما يتحدث أهل مصر
-    - ركز على المعلومات العملية مثل العناوين، الأسعار، المأكولات، والخصائص المميزة"""
+    PDF_FOLDER = "Restaurants_PDF"  
+    SYSTEM_PROMPT = """أنت (DOM) مساعد ذكي يتحدث العربية المصرية بطلاقة.
+                    و انت مواطن من مدينة دمياط الجديده لديك خبره كبيره في المطاعم في هذه المدينه.
+                    ستجيب على الأسئلة بناءً على المعلومات الموجودة في مستندات PDF الخاصة بالمطاعم فقط.
+
+                    - استخدم لغة سهلة وبسيطة كما يتحدث المصريون.
+                    - إذا لم تجد الإجابة في المستندات قل "معنديش المعلومات دي للأسف".
+                    - ركز على المعلومات العملية مثل العناوين، الأسعار، المأكولات، والخصائص المميزة.
+                    - ممنوع تمامًا تذكر أو تحاول تخمّن عدد المطاعم أو أسمائها الكاملة.
+                    - إذا سألك المستخدم عن عدد المطاعم أو أسمائها قل له: "معنديش المعلومات دي للأسف".
+                    """
+    
     UI_THEME = {
         "primary_color": "#FF4B4B",
         "secondary_color": "#FF9E9E",
@@ -42,7 +46,7 @@ class Config:
         "success_color": "#00D100"
     }
 
-# Custom CSS
+# Custom CSS (same as before)
 st.markdown(f"""
 <style>
 :root {{
@@ -152,7 +156,7 @@ if "messages" not in st.session_state:
 @st.cache_resource
 def get_llm():
     return ChatGoogleGenerativeAI(
-        model="gemini-2.5-flash",  # Updated to newer model
+        model="gemini-2.5-flash",
         google_api_key=GOOGLE_API_KEY, 
         temperature=0.7
     )
@@ -164,52 +168,58 @@ def get_embeddings():
         google_api_key=GOOGLE_API_KEY
     )
 
+def extract_text_from_pdf(pdf_file):
+    """Extract text from a PDF file"""
+    try:
+        pdf_reader = PyPDF2.PdfReader(pdf_file)
+        text = ""
+        for page in pdf_reader.pages:
+            text += page.extract_text() or ""  # Handle None returns
+        return text
+    except Exception as e:
+        st.error(f"Error reading PDF: {str(e)}")
+        return ""
+
 @st.cache_resource
 def get_vectorstore():
-    """Create and return the FAISS vectorstore"""
+    """Create and return the FAISS vectorstore from PDF files.
+    Each restaurant (i.e., each PDF) becomes one chunk."""
     documents = []
     pdf_folder = Config.PDF_FOLDER
-    
+
     if not os.path.exists(pdf_folder):
         os.makedirs(pdf_folder)
         return None
-    
+
     for filename in os.listdir(pdf_folder):
         if filename.lower().endswith('.pdf'):
             filepath = os.path.join(pdf_folder, filename)
             try:
-                with open(filepath, "rb") as f:
-                    reader = PdfReader(f)
-                    text = "\n".join([page.extract_text() or "" for page in reader.pages])
+                with open(filepath, 'rb') as f:
+                    text = extract_text_from_pdf(f)
                     if text.strip():
                         documents.append((filename, text))
+                    else:
+                        st.warning(f"📄 ملف {filename} مفيهوش نص مقروء.")
             except Exception as e:
-                st.error(f"Error processing {filename}: {str(e)}")
-    
+                st.error(f"❌ حصل خطأ مع الملف {filename}: {str(e)}")
+
     if not documents:
+        st.error("⚠️ مفيش ملفات PDF صالحة للقراءة")
         return None
-    
-    # Split all texts into chunks
-    text_splitter = CharacterTextSplitter(
-        chunk_size=Config.CHUNK_SIZE, 
-        chunk_overlap=Config.CHUNK_OVERLAP
-    )
-    
-    all_chunks = []
-    for filename, text in documents:
-        chunks = text_splitter.split_text(text)
-        all_chunks.extend([(chunk, filename) for chunk in chunks])
-    
-    # Create vector store
-    texts = [chunk for chunk, _ in all_chunks]
-    metadatas = [{"source": filename} for _, filename in all_chunks]
-    
+
+    # Make each restaurant (file) its own chunk
+    texts = [text for _, text in documents]
+    metadatas = [{"source": filename} for filename, _ in documents]
+
     embeddings = get_embeddings()
-    return FAISS.from_texts(
+    vectorstore = FAISS.from_texts(
         texts=texts,
         embedding=embeddings,
         metadatas=metadatas
-    ), documents
+    )
+
+    return vectorstore, documents
 
 def format_docs(docs):
     """Format retrieved documents for display"""
@@ -222,7 +232,7 @@ def format_docs(docs):
 
 def get_retriever(vectorstore):
     """Create a retriever with similarity search"""
-    return vectorstore.as_retriever(search_kwargs={"k": 5})
+    return vectorstore.as_retriever(search_kwargs={"k": len(documents)})
 
 def create_rag_chain(retriever):
     """Create the RAG chain for question answering"""
@@ -243,15 +253,18 @@ def create_rag_chain(retriever):
         | StrOutputParser()
     )
 
-# Load and process PDFs
-with st.spinner("جاري تحميل معلومات المطاعم... ⏳"):
+# Load and process PDF files
+with st.spinner("جاري تحميل معلومات المطاعم من ملفات PDF... ⏳"):
     result = get_vectorstore()
 
 if not result:
-    st.error("⚠️ مفيش ملفات PDF موجودة في مجلد المطاعم. رجاء ضع الملفات في مجلد 'Restaurants'")
+    st.error("⚠️ مفيش ملفات PDF موجودة في مجلد المطاعم أو لا يمكن قراءتها. رجاء ضع الملفات في مجلد 'Restaurants_PDF' وتأكد أنها تحتوي على نصوص قابلة للقراءة")
     st.stop()
 
 vectorstore, documents = result
+
+st.sidebar.success(f"📊 عدد المطاعم اللي تم استخراج معلوماتهم فعليًا: {vectorstore.index.ntotal}")
+
 retriever = get_retriever(vectorstore)
 rag_chain = create_rag_chain(retriever)
 
@@ -267,7 +280,7 @@ if question := st.chat_input("اسأل سؤال عن المطاعم..."):
         st.markdown(question)
     
     with st.chat_message("assistant"):
-        with st.spinner("🔍بفكر ..."):
+        with st.spinner("ثواني ..."):
             try:
                 response = rag_chain.invoke(question)
                 st.markdown(response)
