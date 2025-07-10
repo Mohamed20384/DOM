@@ -13,7 +13,8 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
 from langchain_community.vectorstores import FAISS
-from typing import List, Dict, Tuple
+from langchain.memory import ConversationBufferMemory
+from langchain.chains import ConversationalRetrievalChain
 
 # Streamlit page configuration MUST be first
 st.set_page_config(
@@ -189,18 +190,15 @@ def get_llm():
 @st.cache_resource
 def get_embeddings():
     return GoogleGenerativeAIEmbeddings(
-        model="models/embedding-001",  # Check if smaller models are available
+        model="models/embedding-001",
         google_api_key=GOOGLE_API_KEY,
         task_type="retrieval_document"
     )
 
 def clean_text(text: str) -> str:
     """Clean extracted PDF text"""
-    # Remove headers/footers
     lines = [line for line in text.split('\n') if len(line.strip()) > 1]
-    # Remove page numbers
     cleaned = '\n'.join(line for line in lines if not line.strip().isdigit())
-    # Merge broken lines
     return cleaned.replace('-\n', '')
 
 def extract_text_from_pdf(pdf_file):
@@ -271,29 +269,39 @@ def get_retriever(vectorstore):
     
     return EnsembleRetriever(
         retrievers=[bm25_retriever, faiss_retriever],
-        weights=[0.4, 0.6]  # Slightly favor vector search
+        weights=[0.4, 0.6]
     )
 
-def create_rag_chain(retriever):
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", Config.SYSTEM_PROMPT),
+@st.cache_resource
+def get_conversation_chain(_retriever):
+    """Create conversation chain with memory"""
+    memory = ConversationBufferMemory(
+        memory_key="chat_history",
+        return_messages=True,
+        output_key='answer'
+    )
+    
+    llm = get_llm()
+    
+    # Create a prompt template that includes the restaurant list
+    prompt_template = ChatPromptTemplate.from_messages([
+        ("system", Config.SYSTEM_PROMPT.format(restaurant_list_text=restaurant_list_text)),
         ("human", """السؤال: {question}
-
+        
         المعلومات ذات الصلة:
         {context}
-
+        
         جاوب بالعربية المصرية:""")
     ])
     
-    return (
-        {
-            "context": retriever | format_docs,
-            "question": RunnablePassthrough(),
-            "restaurant_list_text": lambda _: restaurant_list_text 
-        }
-        | prompt
-        | get_llm()
-        | StrOutputParser()
+    return ConversationalRetrievalChain.from_llm(
+        llm=llm,
+        retriever=_retriever,
+        memory=memory,
+        chain_type="stuff",
+        combine_docs_chain_kwargs={"prompt": prompt_template},
+        get_chat_history=lambda h: h,
+        verbose=True
     )
 
 # Load and process PDF files
@@ -309,7 +317,7 @@ vectorstore, documents = result
 st.sidebar.success(f"📊 عدد المطاعم اللي تم استخراج معلوماتهم فعليًا: {vectorstore.index.ntotal}")
 
 retriever = get_retriever(vectorstore)
-rag_chain = create_rag_chain(retriever)
+conversation_chain = get_conversation_chain(retriever)  # Pass the retriever directly
 
 # Display chat messages
 for message in st.session_state.messages:
@@ -325,17 +333,18 @@ if question := st.chat_input("اسأل سؤال عن المطاعم..."):
     with st.chat_message("assistant"):
         with st.spinner("ثواني ..."):
             try:
-                # Get relevant documents
+                # Get response with conversation memory
+                result = conversation_chain({"question": question})  # Only pass the question now
+                response = result["answer"]
+                
+                # Get context for token counting
                 relevant_docs = retriever.get_relevant_documents(question)
                 context = format_docs(relevant_docs)
-                
-                # Generate response
-                response = rag_chain.invoke(question)
                 
                 # Calculate and store token usage
                 question_tokens = count_tokens(question)
                 context_tokens = count_tokens(context)
-                system_tokens = count_tokens(Config.SYSTEM_PROMPT)
+                system_tokens = count_tokens(Config.SYSTEM_PROMPT.format(restaurant_list_text=restaurant_list_text))
                 response_tokens = count_tokens(response)
                 total_tokens = question_tokens + context_tokens + system_tokens + response_tokens
                 
