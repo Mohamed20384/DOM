@@ -6,24 +6,36 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx2pdf import convert
 
 # === Settings ===
-INPUT_FILE = "Restaurants.json"
+INPUT_FILE = "All Restaurants.json"
 DOCX_DIR = "Restaurants_Word"
 PDF_DIR = "Restaurants_PDF"
+NO_ESHOP_FILE = "no_eshop_restaurants.txt"
 
 # === Create output directories ===
 os.makedirs(DOCX_DIR, exist_ok=True)
 os.makedirs(PDF_DIR, exist_ok=True)
 
-# === Generate Word Docs ===
+# === Load data ===
 with open(INPUT_FILE, 'r', encoding='utf-8') as f:
     data = json.load(f)
 
+# === List for restaurants without eShop ===
+no_eshop_names = []
+
+# === Process restaurants ===
 for rest in data:
+    e_shop = rest.get("eShop", False)
+
+    if not e_shop:
+        rest_name = rest.get("name", "مطعم بدون اسم")
+        no_eshop_names.append(rest_name)
+        continue  # skip document generation
+
     name = rest.get("name", "مطعم بدون اسم")
     address = rest.get("adress", "")
     phone = rest.get("phone", [])
     rank = rest.get("rank", "غير مصنف")
-    bestsell = rest.get("bestsell", "غير محدد")  # ✅ Added bestsell as تصنيف المطعم
+    bestsell = rest.get("bestsell", "غير محدد")
     real_rates = rest.get("realRates", {})
     emenu = rest.get("eMenu", {})
     open_time = rest.get("openTime", "غير معروف")
@@ -48,10 +60,9 @@ for rest in data:
     write_paragraph("اسم المطعم", name)
     write_paragraph("العنوان", address)
     write_paragraph("أرقام الهاتف", phone)
-    write_paragraph("ترتيب المطعم", rank)      
-    write_paragraph("تصنيف المطعم", bestsell)   
+    write_paragraph("ترتيب المطعم", rank)
+    write_paragraph("تصنيف المطعم", bestsell)
 
-    # ✅ Ratings section without emails
     write_paragraph("التقييمات", "")
     for info in real_rates.values():
         rate = info.get("rate", "")
@@ -93,4 +104,11 @@ for rest in data:
     except Exception as e:
         print(f"❌ Error converting {safe_name} to PDF: {e}")
 
-print("✅ All restaurants converted to both Word and PDF formats.")
+# === Save restaurants without eShop to text file ===
+if no_eshop_names:
+    with open(NO_ESHOP_FILE, "w", encoding="utf-8") as f:
+        for name in no_eshop_names:
+            f.write(name + "\n")
+    print(f"📄 Saved names of restaurants without eShop to: {NO_ESHOP_FILE}")
+
+print("✅ All restaurants with eShop converted to Word and PDF.")

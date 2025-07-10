@@ -16,6 +16,9 @@ from langchain_community.vectorstores import FAISS
 from langchain.memory import ConversationBufferMemory
 from langchain.chains import ConversationalRetrievalChain
 
+from langchain.retrievers.document_compressors import EmbeddingsFilter
+from langchain.retrievers import ContextualCompressionRetriever
+
 # Streamlit page configuration MUST be first
 st.set_page_config(
     page_title="مساعد المطاعم المصري",
@@ -34,7 +37,7 @@ def get_restaurant_names_from_folder(folder_path: str) -> List[str]:
 
 PDF_FOLDER_PATH = "Restaurants_PDF"
 restaurant_names = get_restaurant_names_from_folder(PDF_FOLDER_PATH)
-restaurant_list_text = "، ".join(restaurant_names)
+restaurant_list_text = "\n".join([f"- {name}" for name in restaurant_names])
 
 # Configuration
 class Config:
@@ -43,18 +46,21 @@ class Config:
     EMBEDDING_BATCH_SIZE = 10
     MAX_PREVIEW_CHARS = 5000
     PDF_FOLDER = PDF_FOLDER_PATH
-    SYSTEM_PROMPT = """
-                        أنت (DOM) مساعد ذكي يتحدث العربية المصرية بطلاقة.
-                        و انت مواطن من مدينة دمياط الجديده لديك خبره كبيره في المطاعم في هذه المدينه.
-                        ستجيب على الأسئلة بناءً على المعلومات الموجودة في مستندات PDF الخاصة بالمطاعم فقط.
+    SYSTEM_PROMPT = f"""
+                        أنت مساعد ذكي اسمك DOM، شغال في تطبيق مطاعم دمياط. بتتكلم باللهجة المصرية، ومن أهل دمياط الجديدة وعندك خبرة كبيرة بكل المطاعم اللي فيها.
 
-                        - استخدم لغة سهلة وبسيطة كما يتحدث المصريون.
-                        - إذا لم تجد الإجابة في المستندات قل "معنديش المعلومات دي للأسف".
-                        - ركز على المعلومات العملية مثل العناوين، الأسعار، المأكولات، والخصائص المميزة.
-                        
-                        - إذا سألك المستخدم عن عدد المطاعم أو أسمائها قل له: "المطاعم اللي عندي حالياً هي: {restaurant_list_text}"
+                        دورك إنك تجاوب على أسئلة المستخدمين بناءً على المعلومات الموجودة في ملفات PDF الخاصة بالمطاعم فقط.
+
+                        تعليمات مهمة:
+                        - لما المستخدم يسألك عن نفسك أو يقولك "إنت مين؟" أو "عرفني بنفسك"، وقتها بس عرف نفسك وقل: "أنا DOM، مساعدك الذكي في مطاعم دمياط".
+                        - لو المستخدم سألك عن المطاعم أو أي حاجة تانية، متعرفش عن نفسك خالص وادخل في الموضوع على طول.
+                        - ردودك لازم تكون باللهجة المصرية، وبأسلوب بسيط وواضح.
+                        - لو الإجابة مش موجودة في الملفات، قول: "معنديش المعلومات دي للأسف".
+                        - ركز على المعلومات المفيدة زي العناوين، الأسعار، الأكلات، والمميزات الخاصة بكل مطعم.
+                        - لو حد سألك عن عدد المطاعم أو أسمائها، جاوبه كده:
+                        "المطاعم اللي عندي حالياً هي:
+                        {restaurant_list_text}"
                     """
-    
     UI_THEME = {
         "primary_color": "#FF4B4B",
         "secondary_color": "#FF9E9E",
@@ -258,19 +264,44 @@ def format_docs(docs):
         formatted.append(f"📄 المصدر: {source}\n📝 المحتوى:\n{content}\n{'='*50}")
     return "\n\n".join(formatted)
 
+
+def get_compressed_retriever(base_retriever):
+    embeddings = get_embeddings()
+    compressor = EmbeddingsFilter(embeddings=embeddings, similarity_threshold=0.76)
+    return ContextualCompressionRetriever(
+        base_compressor=compressor,
+        base_retriever=base_retriever
+    )
+
+# def get_retriever(vectorstore):
+#     bm25_retriever = BM25Retriever.from_texts(
+#         [doc[1] for doc in documents],
+#         metadatas=[{"source": doc[0]} for doc in documents]
+#     )
+#     bm25_retriever.k = 5
+    
+#     faiss_retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
+    
+#     return EnsembleRetriever(
+#         retrievers=[bm25_retriever, faiss_retriever],
+#         weights=[0.4, 0.6]
+#     )
+
 def get_retriever(vectorstore):
     bm25_retriever = BM25Retriever.from_texts(
         [doc[1] for doc in documents],
         metadatas=[{"source": doc[0]} for doc in documents]
     )
     bm25_retriever.k = 5
-    
+
     faiss_retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
-    
-    return EnsembleRetriever(
+
+    ensemble = EnsembleRetriever(
         retrievers=[bm25_retriever, faiss_retriever],
         weights=[0.4, 0.6]
     )
+
+    return get_compressed_retriever(ensemble)
 
 @st.cache_resource
 def get_conversation_chain(_retriever):
@@ -284,15 +315,21 @@ def get_conversation_chain(_retriever):
     llm = get_llm()
     
     # Create a prompt template that includes the restaurant list
+    # prompt_template = ChatPromptTemplate.from_messages([
+    #     ("system", Config.SYSTEM_PROMPT.format(restaurant_list_text=restaurant_list_text)),
+    #     ("human", """السؤال: {question}
+        
+    #     المعلومات ذات الصلة:
+    #     {context}
+        
+    #     جاوب بالعربية المصرية:""")
+    # ])
+
     prompt_template = ChatPromptTemplate.from_messages([
         ("system", Config.SYSTEM_PROMPT.format(restaurant_list_text=restaurant_list_text)),
-        ("human", """السؤال: {question}
-        
-        المعلومات ذات الصلة:
-        {context}
-        
-        جاوب بالعربية المصرية:""")
+        ("user", "السؤال السابق:\n{chat_history}\n\nالسؤال الحالي:\n{question}\n\nالمعلومات ذات الصلة:\n{context}\n\nجاوب بالعربية المصرية:")
     ])
+
     
     return ConversationalRetrievalChain.from_llm(
         llm=llm,
@@ -303,6 +340,14 @@ def get_conversation_chain(_retriever):
         get_chat_history=lambda h: h,
         verbose=True
     )
+
+def load_no_eshop_restaurants(file_path: str = "no_eshop_restaurants.txt") -> List[str]:
+    if not os.path.exists(file_path):
+        return []
+    with open(file_path, "r", encoding="utf-8") as f:
+        return [line.strip() for line in f if line.strip()]
+
+no_eshop_restaurants = load_no_eshop_restaurants()
 
 # Load and process PDF files
 with st.spinner("جاري تحميل معلومات المطاعم من ملفات PDF... ⏳"):
@@ -333,31 +378,48 @@ if question := st.chat_input("اسأل سؤال عن المطاعم..."):
     with st.chat_message("assistant"):
         with st.spinner("ثواني ..."):
             try:
+                # === Check if question is about a restaurant with no eShop ===
+                for name in no_eshop_restaurants:
+                    if name in question:
+                        fallback_msg = f"للأسف معندناش معلومات عن المطعم '{name}' لأنه مش مشترك في أبلكيشن مطاعم دمياط"
+                        st.markdown(fallback_msg)
+                        st.session_state.messages.append({"role": "assistant", "content": fallback_msg})
+                        st.stop()
+
                 # Get response with conversation memory
                 result = conversation_chain({"question": question})  # Only pass the question now
                 response = result["answer"]
                 
-                # Get context for token counting
+               # Get context for token counting
                 relevant_docs = retriever.get_relevant_documents(question)
                 context = format_docs(relevant_docs)
-                
+
+                # Prepare chat history string for token counting
+                chat_history_str = "\n".join(
+                    [f"{type(m).__name__}: {m.content}" for m in conversation_chain.memory.chat_memory.messages]
+                )
+                chat_history_tokens = count_tokens(chat_history_str)
+
                 # Calculate and store token usage
                 question_tokens = count_tokens(question)
                 context_tokens = count_tokens(context)
                 system_tokens = count_tokens(Config.SYSTEM_PROMPT.format(restaurant_list_text=restaurant_list_text))
                 response_tokens = count_tokens(response)
-                total_tokens = question_tokens + context_tokens + system_tokens + response_tokens
-                
+                total_tokens = (
+                    question_tokens + context_tokens + system_tokens + chat_history_tokens + response_tokens
+                )
+
                 st.session_state.token_usage.append({
                     "question": question,
                     "question_tokens": question_tokens,
                     "context_tokens": context_tokens,
                     "system_tokens": system_tokens,
+                    "chat_history_tokens": chat_history_tokens,  # NEW
                     "response_tokens": response_tokens,
                     "total_tokens": total_tokens,
                     "timestamp": datetime.now().isoformat()
                 })
-                
+
                 st.markdown(response)
                 st.session_state.messages.append({"role": "assistant", "content": response})
             except Exception as e:
