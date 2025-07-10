@@ -264,7 +264,6 @@ def format_docs(docs):
         formatted.append(f"📄 المصدر: {source}\n📝 المحتوى:\n{content}\n{'='*50}")
     return "\n\n".join(formatted)
 
-
 def get_compressed_retriever(base_retriever):
     embeddings = get_embeddings()
     compressor = EmbeddingsFilter(embeddings=embeddings, similarity_threshold=0.76)
@@ -387,10 +386,10 @@ if question := st.chat_input("اسأل سؤال عن المطاعم..."):
                         st.stop()
 
                 # Get response with conversation memory
-                result = conversation_chain({"question": question})  # Only pass the question now
+                result = conversation_chain({"question": question})
                 response = result["answer"]
                 
-               # Get context for token counting
+                # Get context for token counting
                 relevant_docs = retriever.get_relevant_documents(question)
                 context = format_docs(relevant_docs)
 
@@ -398,9 +397,9 @@ if question := st.chat_input("اسأل سؤال عن المطاعم..."):
                 chat_history_str = "\n".join(
                     [f"{type(m).__name__}: {m.content}" for m in conversation_chain.memory.chat_memory.messages]
                 )
-                chat_history_tokens = count_tokens(chat_history_str)
 
                 # Calculate and store token usage
+                chat_history_tokens = count_tokens(chat_history_str)
                 question_tokens = count_tokens(question)
                 context_tokens = count_tokens(context)
                 system_tokens = count_tokens(Config.SYSTEM_PROMPT.format(restaurant_list_text=restaurant_list_text))
@@ -414,7 +413,7 @@ if question := st.chat_input("اسأل سؤال عن المطاعم..."):
                     "question_tokens": question_tokens,
                     "context_tokens": context_tokens,
                     "system_tokens": system_tokens,
-                    "chat_history_tokens": chat_history_tokens,  # NEW
+                    "chat_history_tokens": chat_history_tokens,
                     "response_tokens": response_tokens,
                     "total_tokens": total_tokens,
                     "timestamp": datetime.now().isoformat()
@@ -456,6 +455,7 @@ with st.sidebar:
             <p>المعلومات: {latest['context_tokens']}</p>
             <p>النظام: {latest['system_tokens']}</p>
             <p>الرد: {latest['response_tokens']}</p>
+            <p>التاريخ: {latest['chat_history_tokens']}</p>
             <p><b>المجموع: {latest['total_tokens']}</b></p>
         </div>
         """, unsafe_allow_html=True)
