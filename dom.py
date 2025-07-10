@@ -1,10 +1,13 @@
 import os
 import io
+from datetime import datetime
+from typing import List, Dict, Tuple
 from dotenv import load_dotenv
 import streamlit as st
-import PyPDF2  # Added for PDF support
+import PyPDF2
 import google.generativeai as genai
 from langchain.text_splitter import CharacterTextSplitter
+from langchain.retrievers import BM25Retriever, EnsembleRetriever
 from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough
@@ -20,22 +23,35 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+def get_restaurant_names_from_folder(folder_path: str) -> List[str]:
+    names = []
+    for file in os.listdir(folder_path):
+        if file.endswith(".pdf"):
+            name = os.path.splitext(file)[0].strip()
+            names.append(name)
+    return names
+
+PDF_FOLDER_PATH = "Restaurants_PDF"
+restaurant_names = get_restaurant_names_from_folder(PDF_FOLDER_PATH)
+restaurant_list_text = "، ".join(restaurant_names)
+
 # Configuration
 class Config:
     CHUNK_SIZE = 1000
     CHUNK_OVERLAP = 300
     EMBEDDING_BATCH_SIZE = 10
     MAX_PREVIEW_CHARS = 5000
-    PDF_FOLDER = "Restaurants_PDF"  
-    SYSTEM_PROMPT = """أنت (DOM) مساعد ذكي يتحدث العربية المصرية بطلاقة.
-                    و انت مواطن من مدينة دمياط الجديده لديك خبره كبيره في المطاعم في هذه المدينه.
-                    ستجيب على الأسئلة بناءً على المعلومات الموجودة في مستندات PDF الخاصة بالمطاعم فقط.
+    PDF_FOLDER = PDF_FOLDER_PATH
+    SYSTEM_PROMPT = """
+                        أنت (DOM) مساعد ذكي يتحدث العربية المصرية بطلاقة.
+                        و انت مواطن من مدينة دمياط الجديده لديك خبره كبيره في المطاعم في هذه المدينه.
+                        ستجيب على الأسئلة بناءً على المعلومات الموجودة في مستندات PDF الخاصة بالمطاعم فقط.
 
-                    - استخدم لغة سهلة وبسيطة كما يتحدث المصريون.
-                    - إذا لم تجد الإجابة في المستندات قل "معنديش المعلومات دي للأسف".
-                    - ركز على المعلومات العملية مثل العناوين، الأسعار، المأكولات، والخصائص المميزة.
-                    - ممنوع تمامًا تذكر أو تحاول تخمّن عدد المطاعم أو أسمائها الكاملة.
-                    - إذا سألك المستخدم عن عدد المطاعم أو أسمائها قل له: "معنديش المعلومات دي للأسف".
+                        - استخدم لغة سهلة وبسيطة كما يتحدث المصريون.
+                        - إذا لم تجد الإجابة في المستندات قل "معنديش المعلومات دي للأسف".
+                        - ركز على المعلومات العملية مثل العناوين، الأسعار، المأكولات، والخصائص المميزة.
+                        
+                        - إذا سألك المستخدم عن عدد المطاعم أو أسمائها قل له: "المطاعم اللي عندي حالياً هي: {restaurant_list_text}"
                     """
     
     UI_THEME = {
@@ -46,7 +62,7 @@ class Config:
         "success_color": "#00D100"
     }
 
-# Custom CSS (same as before)
+# Custom CSS
 st.markdown(f"""
 <style>
 :root {{
@@ -144,7 +160,7 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# Initialize session state for chat history
+# Initialize session state
 if "messages" not in st.session_state:
     st.session_state.messages = []
     st.session_state.messages.append({
@@ -152,38 +168,53 @@ if "messages" not in st.session_state:
         "content": "أهلاً وسهلاً! أنا مساعدك الذكي للمطاعم في دمياط الجديدة. ممكن أساعدك بإيه النهاردة؟"
     })
 
+if "token_usage" not in st.session_state:
+    st.session_state.token_usage = []
+
+# Token counting function
+def count_tokens(text: str) -> int:
+    """Simple token estimation (4 chars ≈ 1 token)"""
+    return max(1, len(text) // 4)
+
 # Cached resources
 @st.cache_resource
 def get_llm():
     return ChatGoogleGenerativeAI(
         model="gemini-2.5-flash",
         google_api_key=GOOGLE_API_KEY, 
-        temperature=0.7
+        temperature=0.7,
+        max_output_tokens=3000
     )
 
 @st.cache_resource
 def get_embeddings():
     return GoogleGenerativeAIEmbeddings(
-        model="models/embedding-001", 
-        google_api_key=GOOGLE_API_KEY
+        model="models/embedding-001",  # Check if smaller models are available
+        google_api_key=GOOGLE_API_KEY,
+        task_type="retrieval_document"
     )
 
+def clean_text(text: str) -> str:
+    """Clean extracted PDF text"""
+    # Remove headers/footers
+    lines = [line for line in text.split('\n') if len(line.strip()) > 1]
+    # Remove page numbers
+    cleaned = '\n'.join(line for line in lines if not line.strip().isdigit())
+    # Merge broken lines
+    return cleaned.replace('-\n', '')
+
 def extract_text_from_pdf(pdf_file):
-    """Extract text from a PDF file"""
     try:
         pdf_reader = PyPDF2.PdfReader(pdf_file)
-        text = ""
-        for page in pdf_reader.pages:
-            text += page.extract_text() or ""  # Handle None returns
-        return text
+        text = "\n".join(page.extract_text() or "" for page in pdf_reader.pages)
+        return clean_text(text)
     except Exception as e:
         st.error(f"Error reading PDF: {str(e)}")
         return ""
 
 @st.cache_resource
 def get_vectorstore():
-    """Create and return the FAISS vectorstore from PDF files.
-    Each restaurant (i.e., each PDF) becomes one chunk."""
+    """Create and return the FAISS vectorstore from PDF files"""
     documents = []
     pdf_folder = Config.PDF_FOLDER
 
@@ -208,7 +239,6 @@ def get_vectorstore():
         st.error("⚠️ مفيش ملفات PDF صالحة للقراءة")
         return None
 
-    # Make each restaurant (file) its own chunk
     texts = [text for _, text in documents]
     metadatas = [{"source": filename} for filename, _ in documents]
 
@@ -231,23 +261,36 @@ def format_docs(docs):
     return "\n\n".join(formatted)
 
 def get_retriever(vectorstore):
-    """Create a retriever with similarity search"""
-    return vectorstore.as_retriever(search_kwargs={"k": len(documents)})
+    bm25_retriever = BM25Retriever.from_texts(
+        [doc[1] for doc in documents],
+        metadatas=[{"source": doc[0]} for doc in documents]
+    )
+    bm25_retriever.k = 5
+    
+    faiss_retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
+    
+    return EnsembleRetriever(
+        retrievers=[bm25_retriever, faiss_retriever],
+        weights=[0.4, 0.6]  # Slightly favor vector search
+    )
 
 def create_rag_chain(retriever):
-    """Create the RAG chain for question answering"""
     prompt = ChatPromptTemplate.from_messages([
         ("system", Config.SYSTEM_PROMPT),
         ("human", """السؤال: {question}
-        
+
         المعلومات ذات الصلة:
         {context}
-        
+
         جاوب بالعربية المصرية:""")
     ])
     
     return (
-        {"context": retriever | format_docs, "question": RunnablePassthrough()}
+        {
+            "context": retriever | format_docs,
+            "question": RunnablePassthrough(),
+            "restaurant_list_text": lambda _: restaurant_list_text 
+        }
         | prompt
         | get_llm()
         | StrOutputParser()
@@ -282,10 +325,34 @@ if question := st.chat_input("اسأل سؤال عن المطاعم..."):
     with st.chat_message("assistant"):
         with st.spinner("ثواني ..."):
             try:
+                # Get relevant documents
+                relevant_docs = retriever.get_relevant_documents(question)
+                context = format_docs(relevant_docs)
+                
+                # Generate response
                 response = rag_chain.invoke(question)
+                
+                # Calculate and store token usage
+                question_tokens = count_tokens(question)
+                context_tokens = count_tokens(context)
+                system_tokens = count_tokens(Config.SYSTEM_PROMPT)
+                response_tokens = count_tokens(response)
+                total_tokens = question_tokens + context_tokens + system_tokens + response_tokens
+                
+                st.session_state.token_usage.append({
+                    "question": question,
+                    "question_tokens": question_tokens,
+                    "context_tokens": context_tokens,
+                    "system_tokens": system_tokens,
+                    "response_tokens": response_tokens,
+                    "total_tokens": total_tokens,
+                    "timestamp": datetime.now().isoformat()
+                })
+                
                 st.markdown(response)
                 st.session_state.messages.append({"role": "assistant", "content": response})
             except Exception as e:
+                st.exception(e)
                 error_msg = "⚠️ حصل خطأ في الإجابة، حاول تاني بعد شوية"
                 st.error(error_msg)
                 st.session_state.messages.append({"role": "assistant", "content": error_msg})
@@ -307,6 +374,20 @@ with st.sidebar:
                 <div>{text[:Config.MAX_PREVIEW_CHARS] + ("..." if len(text) > Config.MAX_PREVIEW_CHARS else "")}</div>
             </div>
             """, unsafe_allow_html=True)
+    
+    # Token usage display
+    if st.session_state.token_usage:
+        latest = st.session_state.token_usage[-1]
+        st.markdown(f"""
+        <div style="text-align: right; direction: rtl; margin-top: 1rem; padding: 1rem; background-color: #1E1E1E; border-radius: 10px;">
+            <p><b>Token Usage:</b></p>
+            <p>السؤال: {latest['question_tokens']}</p>
+            <p>المعلومات: {latest['context_tokens']}</p>
+            <p>النظام: {latest['system_tokens']}</p>
+            <p>الرد: {latest['response_tokens']}</p>
+            <p><b>المجموع: {latest['total_tokens']}</b></p>
+        </div>
+        """, unsafe_allow_html=True)
     
     st.markdown("""
     <div style="text-align: center; margin-top: 2rem; color: #888;">

@@ -10,3 +10,4 @@ langchain-community
 fpdf
 langchain_google_genai
 faiss-cpu
+rank_bm25

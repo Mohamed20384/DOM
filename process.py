@@ -22,7 +22,9 @@ for rest in data:
     name = rest.get("name", "مطعم بدون اسم")
     address = rest.get("adress", "")
     phone = rest.get("phone", [])
-    comments = rest.get("comments", {})
+    rank = rest.get("rank", "غير مصنف")
+    bestsell = rest.get("bestsell", "غير محدد")  # ✅ Added bestsell as تصنيف المطعم
+    real_rates = rest.get("realRates", {})
     emenu = rest.get("eMenu", {})
     open_time = rest.get("openTime", "غير معروف")
     close_time = rest.get("closeTime", "غير معروف")
@@ -46,10 +48,17 @@ for rest in data:
     write_paragraph("اسم المطعم", name)
     write_paragraph("العنوان", address)
     write_paragraph("أرقام الهاتف", phone)
+    write_paragraph("ترتيب المطعم", rank)      
+    write_paragraph("تصنيف المطعم", bestsell)   
 
-    write_paragraph("التعليقات", "")
-    for email, comment in comments.items():
-        write_paragraph(f"من {email}", comment)
+    # ✅ Ratings section without emails
+    write_paragraph("التقييمات", "")
+    for info in real_rates.values():
+        rate = info.get("rate", "")
+        comment = info.get("comment", "")
+        rate_text = f"التقييم: {rate}"
+        comment_text = f"التعليق: {comment}" if comment else ""
+        write_paragraph("", f"{rate_text}\n{comment_text}")
 
     write_paragraph("القائمة الإلكترونية", "")
     for section_name, section in emenu.items():
@@ -58,7 +67,8 @@ for rest in data:
             for product in section['products']:
                 write_paragraph(" - الاسم", product.get("name", ""))
                 write_paragraph("   الوصف", product.get("desc", ""))
-                write_paragraph("   السعر", product.get("price", ""))
+                if 'price' in product:
+                    write_paragraph("   السعر", product['price'])
                 if 'sizes' in product:
                     for size, price in product['sizes'].items():
                         write_paragraph(f"   الحجم: {size}", price)
