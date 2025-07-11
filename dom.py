@@ -308,6 +308,7 @@ def get_conversation_chain(_retriever):
     memory = ConversationBufferMemory(
         memory_key="chat_history",
         return_messages=True,
+        k=3,
         output_key='answer'
     )
     
